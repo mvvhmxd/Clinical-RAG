@@ -32,12 +32,31 @@ HEADER_PATTERN = re.compile(
     r"^\s*Suspected cancer:\s*recognition and referral\s*\(NG12\)\s*$",
     re.IGNORECASE,
 )
-FOOTER_START_PATTERN = re.compile(r"^\s*©\s*NICE\s+2026\.")
-FOOTER_CONTINUATION_PATTERN = re.compile(
-    r"^\s*conditions#notice-of-rights\).*Page\s+\d+\s+of\s*$",
+FOOTER_START_PATTERN = re.compile(
+    r"^\s*(?:©\s*NICE\s+\d{4}\.|Subject to Notice of rights)",
     re.IGNORECASE,
 )
-PAGE_COUNT_LINE_PATTERN = re.compile(r"^\s*101\s*$")
+# The footer wraps across a variable number of lines depending on where the PDF broke it:
+#
+#   © NICE 2026. All rights reserved. Subject to Notice of rights (https://...terms-and-
+#   conditions#notice-of-rights).
+#   Page 14 of
+#   101
+#
+# On some pages the URL tail and "Page N of" share a line, on others they do not. Matching
+# the block line by line handles both, where a single combined pattern did not and left
+# "conditions#notice-of-rights). 101" embedded mid-recommendation.
+FOOTER_TAIL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # The URL tail may be trailed by "Page N of" and/or the bare page total on the same
+    # line, separated by column padding the extractor preserves as runs of spaces.
+    re.compile(
+        r"^conditions#notice-of-rights\)\.?(?:\s+Page\s+\d+\s+of)?(?:\s+\d{1,3})?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^Page\s+\d+\s+of(?:\s+\d{1,3})?\s*$", re.IGNORECASE),
+    re.compile(r"^\d{1,3}$"),
+    re.compile(r"^All rights reserved\.?\s*$", re.IGNORECASE),
+)
 
 SUBSECTION_RANGES: dict[str, tuple[tuple[range, str], ...]] = {
     "1.1": (
@@ -167,22 +186,20 @@ def clean_page_text(text: str) -> str:
 
     lines = text.replace("\u00ad", "").replace("\r\n", "\n").splitlines()
     cleaned: list[str] = []
-    skip_page_count = False
+    in_footer = False
     for line in lines:
         stripped = line.strip()
         if HEADER_PATTERN.match(stripped):
+            in_footer = False
             continue
         if FOOTER_START_PATTERN.match(stripped):
-            skip_page_count = True
+            in_footer = True
             continue
-        if FOOTER_CONTINUATION_PATTERN.match(stripped):
-            skip_page_count = True
-            continue
-        if skip_page_count and PAGE_COUNT_LINE_PATTERN.match(stripped):
-            skip_page_count = False
-            continue
-        if stripped:
-            skip_page_count = False
+        if in_footer:
+            if not stripped or any(p.match(stripped) for p in FOOTER_TAIL_PATTERNS):
+                continue
+            # A line that is not part of the footer block means real content resumed.
+            in_footer = False
         cleaned.append(line.rstrip())
     return "\n".join(cleaned).strip()
 
