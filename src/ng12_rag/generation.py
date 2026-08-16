@@ -15,9 +15,9 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any, TypeVar
 
-from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .llm_client import create_llm_client, default_generation_model
 from .guardrails import (
     GuardrailConfig,
     assess_retrieval_confidence,
@@ -52,9 +52,11 @@ class GenerationConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    model: str = Field(default_factory=lambda: os.getenv("NG12_GENERATION_MODEL", "gpt-5-mini"))
+    model: str = Field(
+        default_factory=lambda: os.getenv("NG12_GENERATION_MODEL") or default_generation_model()
+    )
     verifier_model: str = Field(
-        default_factory=lambda: os.getenv("NG12_VERIFICATION_MODEL", "gpt-5-mini")
+        default_factory=lambda: os.getenv("NG12_VERIFICATION_MODEL") or default_generation_model()
     )
     max_completion_tokens: int = Field(default=5000, ge=500, le=30000)
     verifier_max_completion_tokens: int = Field(default=3500, ge=500, le=30000)
@@ -258,6 +260,9 @@ def _model_token_limit(model: str, token_limit: int) -> dict[str, int]:
     """Select the token parameter accepted by the configured provider family."""
 
     lowered = model.casefold()
+    if lowered.startswith("gemini") or lowered.startswith("gemma"):
+        # Gemini's token budget travels inside generationConfig, set by the client adapter.
+        return {}
     if lowered.startswith("gpt-"):
         return {"max_completion_tokens": token_limit}
     return {"max_tokens": token_limit}
@@ -387,8 +392,8 @@ class GroundedGenerator:
         config: GenerationConfig | None = None,
     ) -> None:
         self.config = config or GenerationConfig()
-        # OpenAI() reads the sandbox's preconfigured OPENAI_API_KEY and endpoint.
-        self.client = client or OpenAI()
+        # Gemini when GEMINI_API_KEY is present, OpenAI otherwise; injected clients win.
+        self.client = client or create_llm_client()
 
     def _call_structured(
         self,
