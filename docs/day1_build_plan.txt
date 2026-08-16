@@ -1,0 +1,57 @@
+NG12 Medical RAG — 2-Day Production Build Plan (Optimized for Score)
+
+Scope: NICE NG12 — Lung, Colorectal, Upper GI, Renal & Bladder Rubric: Retrieval 30% | Grounding & Citation 25% | Architecture 15% | Evaluation 15% | Safety & UX 15% Principle: every hour goes to something a judge scores. Cut silently anything that doesn't map to a rubric line.
+
+DAY 1 — Ingestion, Retrieval, Grounding (the 55% of your score)
+Morning: Chunking (don't shortcut — this is where 73% of RAG failures originate)
+Pin the source PDF to the 15 April 2026 NG12 version. State this in your README — version-awareness is a free, cheap credibility signal.
+Chunk by numbered recommendation, not fixed size. One recommendation = one chunk, self-contained.
+Metadata schema per chunk — this is your Retrieval Quality "chunk metadata transparency" line item, made concrete:
+cancer_site, recommendation_id, revision_year, action_type (refer / consider_referral / offer_investigation), age_condition, symptom_condition, lab_threshold, rule_type (single_condition / multi_branch / probability_based)
+Winning add-on: generate a synthetic "negative chunk" set — a handful of adjacent-but-wrong clauses (e.g. a colorectal clause with the wrong age band) and verify your retriever doesn't surface them for the wrong query. This becomes a live-demo trust signal: "here's how we tested against near-miss retrieval," which almost no other team will show.
+Midday: Hybrid Retrieval
+Vector search + BM25/keyword hybrid. Clinical text has exact terms (ages, thresholds, drug/lab names) pure semantic search can miss — this is a known production pattern, not optional.
+Lightweight reranker on top-K before generation, even a simple cross-encoder. If time is genuinely too tight, cut this before you cut chunking quality — but try to keep at least a naive version, since "Hybrid + Rerank" is explicitly the standard the judges' technical bar is set against.
+Afternoon: Generation + Grounding
+Force inline per-claim citations to recommendation_id in the generation prompt — not "per NG12" but "per 1.3.1." This is the single highest-leverage move for Grounding & Citation (25%).
+Winning add-on: add a post-generation faithfulness self-check — after the model answers, run a second pass (or a lightweight NLI check) verifying each claim against the cited chunk, and surface a per-claim confidence flag in the UI. This directly demonstrates the "tight claim-to-chunk binding" and "confidence indicators" rubric lines simultaneously, in one mechanism — efficient for a 2-day build.
+End of Day 1 checkpoint
+
+System answers in-scope queries across all 4 sites with bound, correct citations. Negative-chunk test passes. Reranker (even simple) is live.
+
+DAY 2 — Guardrails, Evaluation, Architecture, Demo (the 30% + the demo itself)
+Morning: Guardrails & Safety/UX (cheap to build, high rubric value — don't skip)
+Scope-check layer before retrieval:
+Out-of-scope cancer site → explicit refusal naming what IS covered
+Diagnosis-style question ("do I have cancer?") → refuse, redirect to referral-threshold framing, not diagnosis
+Underspecified query (missing age/symptom) → ask one clarifying question, don't guess
+Fixed clinical disclaimer, visible on every response.
+Winning add-on: an explicit "uncertain — recommend clinician review" fallback state when confidence is low, distinct from a hard refusal. Most teams will build binary refuse/answer; a third calibrated state ("I can give a partial answer but confidence is low") is a stronger, more clinically realistic safety story and costs almost nothing to add on top of the confidence flag you already built Day 1.
+Midday: Evaluation
+Build a 12–15 question labeled set (compressed from 20+ given the timeline — say so honestly in your writeup rather than padding):
+Single-condition lookups (2-3 per site)
+At least 1 multi-branch synthesis question (colorectal's 3-way branch is your best showcase)
+2-3 refusal/edge cases (out-of-scope site, diagnosis request, ambiguous input)
+1-2 boundary cases (age exactly at cutoff, FIT result exactly at 10 μg/g)
+Run RAGAS: Context Precision, Context Recall, Faithfulness, Answer Relevancy.
+Write failure analysis as you go, not after. For every wrong answer: was it a retrieval miss or a faithfulness/generation failure? This is an explicit rubric requirement ("clear failure analysis and trade-off understanding") and the first thing skipped under time pressure — protect this over polish.
+Afternoon: Architecture Diagram + Demo Rehearsal
+Draw the pipeline now, while you still remember exactly what you built:
+   Query → Scope/Guardrail Check → Hybrid Retriever → Reranker →
+   Context Assembly → Generator (per-claim citation) → Faithfulness Self-Check →
+   Confidence/Uncertainty Router → Response
+Rehearse 3 demo queries: one clean single-condition answer, one multi-branch synthesis (your best retrieval showcase), one refusal or uncertain-state trigger (your best safety showcase).
+Prepare your "why 4 sites" and "why NG12" talking points — rule-shape diversity (count-based / multi-branch+lab / probability-threshold / clean-inline) and confirmed low team overlap.
+End of Day 2 checkpoint
+
+Metrics table + written failure analysis. Architecture diagram done. 3 demo queries rehearsed, including one guardrail trigger.
+
+The 4 "winning add-ons" in one place (highest score-per-hour additions)
+Negative-chunk retrieval testing — proves retrieval robustness, not just accuracy
+Post-generation faithfulness self-check with per-claim confidence flags
+A calibrated third state (uncertain / recommend clinician review) beyond binary answer/refuse
+Explicit, spoken rationale for scope and source choice — turns a limitation (4 sites, not full NG12) into a demonstrated design decision
+What's being deliberately cut for the 2-day window (state this openly, don't hide it)
+Full agentic/multi-hop retrieval — noted as a "next step," not attempted
+Upper GI probability-threshold clauses — recommend excluding from Day 2 scope entirely unless Day 1 finishes early; state this exclusion explicitly rather than let a judge find an ungrounded probability answer
+Eval set size (12-15 vs 20+) — disclosed honestly, framed as "prioritized quality/diversity of cases over raw count under a 2-day constraint"

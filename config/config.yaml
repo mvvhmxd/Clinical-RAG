@@ -1,0 +1,187 @@
+project:
+  name: "NG12 Medical RAG"
+  guideline_id: "NG12"
+  guideline_title: "Suspected cancer: recognition and referral"
+  guideline_version: "2026-04-15"
+  jurisdiction: "England and Wales"
+
+source:
+  pdf_path: "data/raw/ng12.pdf"
+  expected_title: "Suspected cancer: recognition and referral"
+  expected_author: "National Institute for Health and Care Excellence (NICE)"
+  expected_page_count: 101
+  expected_last_updated_text: "Last updated: 15 April 2026"
+  expected_sha256: "140ecbe21a689a483f76fc5d05a954d759d4fab75773692df7b883124b691a27"
+  strict_validation: true
+  raw_recommendations_path: "data/processed/raw_recommendations.jsonl"
+  chunks_path: "data/processed/chunks.jsonl"
+  corpus_manifest_path: "data/processed/corpus_manifest.json"
+
+scope:
+  include_sections:
+    "1.1":
+      cancer_site: "lung_and_pleural"
+      section_title: "Lung and pleural cancers"
+    "1.2":
+      cancer_site: "upper_gastrointestinal"
+      section_title: "Upper gastrointestinal tract cancers"
+    "1.3":
+      cancer_site: "lower_gastrointestinal"
+      section_title: "Lower gastrointestinal tract cancers"
+    "1.6":
+      cancer_site: "urological"
+      section_title: "Urological cancers"
+  required_id_ranges:
+    - {section: "1.1", start: 1, end: 6}
+    - {section: "1.2", start: 1, end: 11}
+    - {section: "1.3", start: 1, end: 6}
+    - {section: "1.6", start: 1, end: 10}
+  expected_recommendation_count: 33
+
+chunking:
+  strategy: "numbered_recommendation"
+  one_recommendation_per_chunk: true
+  include_section_context_in_embedding_text: true
+  terminal_revision_pattern: "\\[(?:19|20)\\d{2}(?:,\\s*amended\\s*(?:19|20)\\d{2})?\\]"
+  max_recommendation_characters_warning: 6000
+
+metadata:
+  schema_version: "1.0.0"
+  default_revision_year: 2026
+  supported_action_types:
+    - "refer"
+    - "consider_referral"
+    - "offer_investigation"
+    - "safety_netting"
+    - "patient_support"
+    - "diagnostic_process"
+    - "clinical_assessment"
+  supported_rule_types:
+    - "single_condition"
+    - "multi_branch"
+    - "probability_based"
+    - "threshold_based"
+    - "process"
+
+negative_chunks:
+  enabled: true
+  output_path: "data/processed/negative_chunks.jsonl"
+  include_in_index: true
+  production_filter: true
+  rerank_penalty: 1.0
+
+embedding:
+  provider: "auto"
+  openai_model: "text-embedding-3-small"
+  local_model: "BAAI/bge-small-en-v1.5"
+  local_query_prefix: "Represent this sentence for searching relevant passages: "
+  batch_size: 32
+  normalize: true
+  request_timeout_seconds: 60
+
+vector_store:
+  engine: "faiss"
+  metric: "inner_product"
+  index_path: "data/index/vectors.faiss"
+  metadata_path: "data/index/metadata.jsonl"
+  bm25_corpus_path: "data/index/bm25_corpus.json"
+  manifest_path: "data/index/index_manifest.json"
+
+retrieval:
+  vector_top_k: 24
+  bm25_top_k: 24
+  fusion_top_k: 20
+  rerank_top_k: 8
+  final_top_k: 6
+  reciprocal_rank_fusion_k: 60
+  vector_weight: 0.60
+  bm25_weight: 0.40
+  exact_recommendation_id_boost: 0.35
+  exact_numeric_match_boost: 0.12
+  numeric_conflict_penalty: 0.18
+  minimum_fused_score: 0.010
+  log_scores: true
+  retrieval_log_path: "logs/retrieval.jsonl"
+
+reranker:
+  provider: "auto"
+  cross_encoder_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  cross_encoder_weight: 0.65
+  fused_score_weight: 0.25
+  clinical_feature_weight: 0.10
+  fallback: "deterministic_clinical_features"
+
+scope_guard:
+  covered_labels:
+    - "lung"
+    - "pleural"
+    - "mesothelioma"
+    - "oesophageal"
+    - "esophageal"
+    - "gastric"
+    - "stomach"
+    - "pancreatic"
+    - "pancreas"
+    - "gall bladder"
+    - "gallbladder"
+    - "liver"
+    - "colorectal"
+    - "bowel"
+    - "anal"
+    - "bladder"
+    - "renal"
+    - "kidney"
+    - "urological"
+    - "prostate"
+    - "testicular"
+    - "penile"
+  out_of_scope_cancer_labels:
+    - "breast"
+    - "ovarian"
+    - "endometrial"
+    - "cervical"
+    - "vulval"
+    - "vaginal"
+    - "skin"
+    - "melanoma"
+    - "oral"
+    - "laryngeal"
+    - "thyroid"
+    - "brain"
+    - "leukaemia"
+    - "leukemia"
+    - "lymphoma"
+    - "myeloma"
+    - "sarcoma"
+  diagnosis_patterns:
+    - "do i have cancer"
+    - "have i got cancer"
+    - "diagnose me"
+    - "is this cancer"
+  minimum_query_characters: 8
+
+generation:
+  model: "gpt-5-mini"
+  temperature: 0.0
+  max_completion_tokens: 2200
+  context_token_budget: 9000
+  minimum_answer_confidence: 0.58
+  minimum_retrieval_confidence: 0.22
+  require_recommendation_id_per_claim: true
+  require_verbatim_supporting_quotes: true
+  allow_synthetic_negative_context: false
+  structured_output: true
+  faithfulness_self_check: true
+  faithfulness_model: "gpt-5-mini"
+  request_timeout_seconds: 90
+  max_retries: 3
+
+evaluation:
+  test_cases_path: "data/evaluation/retrieval_cases.json"
+  output_path: "data/evaluation/latest_results.json"
+  negative_max_rank: 5
+  retrieval_hit_k: 5
+
+logging:
+  level: "INFO"
+  format: "json"

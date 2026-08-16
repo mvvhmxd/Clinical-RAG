@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime logs and scratch files
+logs/*.jsonl
+work/
+
+# Model caches
+.cache/
+models/
+
+# Full-guideline integration is intentionally deferred to a later commit
+data/raw/ng12_full_guideline.pdf
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
