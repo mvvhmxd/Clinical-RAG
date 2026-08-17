@@ -318,12 +318,11 @@ def _cap_answer_confidence(
         verdict = verifier_by_index.get(index)
         if verdict is not None:
             caps.append(verdict.confidence)
+        # Copy-with-update rather than reconstructing field by field: an explicit rebuild
+        # silently drops any field added later, which is how condition_evaluations went
+        # missing from capped answers.
         capped_evidence.append(
-            Evidence(
-                claim=evidence.claim,
-                supporting_citations=evidence.supporting_citations,
-                confidence=ConfidenceLevel.minimum(*caps),
-            )
+            evidence.model_copy(update={"confidence": ConfidenceLevel.minimum(*caps)})
         )
 
     overall = ConfidenceLevel.minimum(
@@ -332,13 +331,13 @@ def _cap_answer_confidence(
         verifier_overall,
         *(evidence.confidence for evidence in capped_evidence),
     )
-    return FullResponse(
-        recommendation_summary=response.recommendation_summary,
-        evidence_list=capped_evidence,
-        overall_confidence=overall,
-        disclaimer=response.disclaimer,
-        refusal_reason=None,
-        clarifying_question=None,
+    return response.model_copy(
+        update={
+            "evidence_list": capped_evidence,
+            "overall_confidence": overall,
+            "refusal_reason": None,
+            "clarifying_question": None,
+        }
     )
 
 
