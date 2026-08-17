@@ -44,12 +44,7 @@ MIN_LINK_MARGIN = 1.15
 MIN_CLINICAL_TOKENS = 40
 
 _STOPWORDS = frozenset(
-    """a an and are as at be been but by for from had has have if in into is it its of on or
-    that the their then there these they this to was were will with which who whom would
-    people person adults patients using pathway suspected cancer refer referral offer consider
-    assess assessment guideline recommendation recommendations evidence review study studies
-    included patient primary care nice full short table figure appendix chapter section
-    """.split()
+    ["a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "for", "from", "had", "has", "have", "if", "in", "into", "is", "it", "its", "of", "on", "or", "that", "the", "their", "then", "there", "these", "they", "this", "to", "was", "were", "will", "with", "which", "who", "whom", "would", "people", "person", "adults", "patients", "using", "pathway", "suspected", "cancer", "refer", "referral", "offer", "consider", "assess", "assessment", "guideline", "recommendation", "recommendations", "evidence", "review", "study", "studies", "included", "patient", "primary", "care", "nice", "full", "short", "table", "figure", "appendix", "chapter", "section"]
 )
 
 _WORD = re.compile(r"[a-z][a-z\-]{2,}")
@@ -58,9 +53,12 @@ _NUMERIC = re.compile(r"\b\d+(?:\.\d+)?\b")
 # Extraction noise specific to the evidence guideline: diagnostic-accuracy rows, confidence
 # intervals, and reference markers that survive block extraction as standalone fragments.
 _NOISE_LINE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^\s*\d+(?:\.\d+)?\s*\(\s*\d+(?:\.\d+)?\s*[-–—]\s*\d+(?:\.\d+)?\s*\)\s*[\d/]*\s*$"),
+    # Confidence-interval ranges in this document use en and em dashes as well as hyphens.
+    re.compile(
+        r"^\s*\d+(?:\.\d+)?\s*\(\s*\d+(?:\.\d+)?\s*[-\u2013\u2014]\s*\d+(?:\.\d+)?\s*\)\s*[\d/]*\s*$"
+    ),
     re.compile(r"^\s*(?:TP|FP|FN|TN)\s*=.*$", re.IGNORECASE),
-    re.compile(r"^\s*[\d\s./%()–—-]+\s*$"),
+    re.compile(r"^\s*[\d\s./%()\u2013\u2014-]+\s*$"),
     re.compile(r"^\s*(?:Table|Figure)\s+\d+[\d.]*\s*:?\s*$", re.IGNORECASE),
     # Meta-analysis rows flatten into prose-looking text with a dangling sample size and a
     # run of author-year citations, e.g. "Haematuria All patients (N = Collins (2013), ...".

@@ -13,10 +13,10 @@ import json
 import logging
 import re
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable
 
 from pypdf import PdfReader
 

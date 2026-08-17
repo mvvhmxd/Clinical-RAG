@@ -17,7 +17,11 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .llm_client import create_llm_client, default_generation_model
+from .deterministic import (
+    ExecutionInfo,
+    ExecutionMode,
+    generate_deterministic_response,
+)
 from .guardrails import (
     GuardrailConfig,
     assess_retrieval_confidence,
@@ -26,6 +30,7 @@ from .guardrails import (
     unsupported_generation_response,
     validate_response_sources,
 )
+from .llm_client import create_llm_client, default_generation_model
 from .prompts import (
     FAITHFULNESS_VERIFICATION_SYSTEM_PROMPT,
     GROUNDED_GENERATION_SYSTEM_PROMPT,
@@ -42,6 +47,19 @@ from .response_schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class GenerationUnavailable(RuntimeError):
+    """The model path could not complete, so a non-model path must decide the outcome.
+
+    Distinct from a guardrail refusal: this means the system could not check, not that it
+    checked and declined.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 _RECOMMENDATION_ID_RE = re.compile(r"^\d+(?:\.\d+)+$")
@@ -443,6 +461,84 @@ class GroundedGenerator:
     ) -> FullResponse:
         """Return a grounded answer, clarification, or safe structured refusal."""
 
+        try:
+            return self._generate_live(query, retrieved_chunks)
+        except GenerationUnavailable as exc:
+            return FullResponse.refusal(reason=exc.reason)
+
+    def generate_with_execution(
+        self,
+        query: str,
+        retrieved_chunks: Sequence[Any] | None,
+        *,
+        deterministic: bool = False,
+    ) -> tuple[FullResponse, ExecutionInfo]:
+        """Answer and report honestly which path produced the answer.
+
+        A guardrail block is reported as withheld, not as a fallback: nothing was retried and
+        nothing was extracted. When the model itself is unavailable the deterministic path
+        answers instead, and the mode says so.
+        """
+
+        if deterministic:
+            normalized = self._normalized_or_none(query, retrieved_chunks)
+            if normalized is None:
+                return (
+                    FullResponse.refusal(reason="No valid NG12 context was available."),
+                    ExecutionInfo(
+                        mode=ExecutionMode.DETERMINISTIC_SELECTED,
+                        reason="operator selected the no-LLM path",
+                    ),
+                )
+            return generate_deterministic_response(
+                query,
+                normalized,
+                mode=ExecutionMode.DETERMINISTIC_SELECTED,
+                reason="operator selected the no-LLM path",
+            )
+
+        try:
+            response = self._generate_live(query, retrieved_chunks)
+        except GenerationUnavailable as exc:
+            normalized = self._normalized_or_none(query, retrieved_chunks)
+            if normalized is None:
+                return (
+                    FullResponse.refusal(reason=exc.reason),
+                    ExecutionInfo(mode=ExecutionMode.WITHHELD, reason=exc.reason),
+                )
+            return generate_deterministic_response(
+                query, normalized, mode=ExecutionMode.FALLBACK, reason=exc.reason
+            )
+
+        if response.refusal_reason or response.clarifying_question:
+            return response, ExecutionInfo(
+                mode=ExecutionMode.WITHHELD,
+                reason=response.refusal_reason or "clarification requested",
+            )
+
+        return response, ExecutionInfo(
+            mode=ExecutionMode.LIVE,
+            model=self.config.model,
+            faithfulness_checked=self.config.run_faithfulness_check,
+        )
+
+    def _normalized_or_none(
+        self, query: str, retrieved_chunks: Sequence[Any] | None
+    ) -> list[dict[str, Any]] | None:
+        """Return validated chunks for the deterministic path, or None if there are none."""
+
+        if not isinstance(query, str) or not query.strip():
+            return None
+        normalization = normalize_retrieved_chunks(list(retrieved_chunks or []), config=self.config)
+        return normalization.chunks or None
+
+    def _generate_live(
+        self,
+        query: str,
+        retrieved_chunks: Sequence[Any] | None,
+    ) -> FullResponse:
+        """Run the model-dependent path, raising GenerationUnavailable if it cannot complete."""
+
         if not isinstance(query, str):
             return FullResponse.refusal(reason="The query must be provided as text.")
         if len(query) > self.config.max_query_characters:
@@ -501,20 +597,16 @@ class GroundedGenerator:
             )
         except (ValidationError, ValueError, TypeError, RuntimeError) as exc:
             logger.warning("Grounded generation failed validation: %s", exc)
-            return FullResponse.refusal(
-                reason=(
-                    "The model did not return a structurally valid grounded response, so the "
-                    "system failed closed."
-                )
-            )
-        except Exception:
+            raise GenerationUnavailable(
+                "The model did not return a structurally valid grounded response, so the "
+                "system failed closed."
+            ) from exc
+        except Exception as exc:
             logger.exception("Grounded generation request failed")
-            return FullResponse.refusal(
-                reason=(
-                    "The grounded generation service was unavailable, so no clinical answer "
-                    "was produced."
-                )
-            )
+            raise GenerationUnavailable(
+                "The grounded generation service was unavailable, so no clinical answer "
+                "was produced."
+            ) from exc
 
         response = ensure_fixed_disclaimer(response)
         if response.refusal_reason or response.clarifying_question:
@@ -538,20 +630,16 @@ class GroundedGenerator:
                 )
             except (ValidationError, ValueError, TypeError, RuntimeError) as exc:
                 logger.warning("Faithfulness verification failed validation: %s", exc)
-                return FullResponse.refusal(
-                    reason=(
-                        "The post-generation faithfulness check did not return a valid verdict, "
-                        "so the answer was withheld."
-                    )
-                )
-            except Exception:
+                raise GenerationUnavailable(
+                    "The post-generation faithfulness check did not return a valid verdict, "
+                    "so the answer was withheld."
+                ) from exc
+            except Exception as exc:
                 logger.exception("Faithfulness verification request failed")
-                return FullResponse.refusal(
-                    reason=(
-                        "The post-generation faithfulness check was unavailable, so the answer "
-                        "was withheld."
-                    )
-                )
+                raise GenerationUnavailable(
+                    "The post-generation faithfulness check was unavailable, so the answer "
+                    "was withheld."
+                ) from exc
 
             faithfulness_issues = _validate_faithfulness_report(report, response)
             if faithfulness_issues:

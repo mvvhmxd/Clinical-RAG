@@ -13,10 +13,11 @@ import argparse
 import hashlib
 import json
 import re
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from itertools import groupby
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any
 
 MIN_CHUNK_TOKENS = 400
 TARGET_CHUNK_TOKENS = 650

@@ -102,7 +102,7 @@ def test_grade_table_rows_are_not_treated_as_subsection_headings():
 
 def test_subsection_site_map_covers_tier1_locked_sites():
     mapped = set(FULL_SUBSECTION_SITES.values())
-    assert LOCKED_CANCER_SITES <= mapped
+    assert mapped >= LOCKED_CANCER_SITES
 
 
 def test_cleaning_removes_statistics_rows_but_keeps_prose():

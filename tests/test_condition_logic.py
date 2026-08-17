@@ -159,7 +159,7 @@ class TestSchemaEnforcement:
     def test_conclusion_must_follow_from_its_conditions(self):
         """A claim cannot assert MET while carrying a failed AND condition."""
 
-        from ng12_rag.response_schema import Citation, DocumentType, Evidence, ConfidenceLevel
+        from ng12_rag.response_schema import Citation, ConfidenceLevel, DocumentType, Evidence
 
         citation = Citation(
             document_type=DocumentType.NG12_SHORT,
