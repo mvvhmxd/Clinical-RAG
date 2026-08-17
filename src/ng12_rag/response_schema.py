@@ -67,6 +67,67 @@ class ConfidenceLevel(StrEnum):
         return min(levels, key=lambda level: level.rank)
 
 
+class ConditionStatus(StrEnum):
+    """Whether the question's stated values satisfy one condition in the source text."""
+
+    MET = "MET"
+    NOT_MET = "NOT_MET"
+    UNKNOWN = "UNKNOWN"
+
+
+class ConditionLogic(StrEnum):
+    """How a recommendation combines its conditions, per the source's own wording."""
+
+    AND = "AND"
+    OR = "OR"
+    SINGLE = "SINGLE"
+
+
+class ConditionEvaluation(BaseModel):
+    """One discrete condition checked against the values stated in the question.
+
+    Retrieving the right recommendation is not the same as answering the question. Quoting
+    "aged 40 and over" for a 39-year-old without stating that the criterion fails is a
+    misleading answer with a perfect citation, so every claim must carry this evaluation.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    condition_text: str = Field(
+        ...,
+        min_length=1,
+        max_length=600,
+        description="The condition as written in the source, quoted not paraphrased.",
+    )
+    stated_value: str | None = Field(
+        ...,
+        description="The value the question supplies for this condition, or null if absent.",
+    )
+    status: ConditionStatus
+    at_boundary: bool = Field(
+        ...,
+        description="True when the stated value sits exactly on the threshold.",
+    )
+    reasoning: str = Field(
+        ...,
+        min_length=1,
+        max_length=1200,
+        description="The explicit comparison, naming both the threshold and the stated value.",
+    )
+
+    @model_validator(mode="after")
+    def validate_unknown_has_no_value(self) -> ConditionEvaluation:
+        if self.status is ConditionStatus.UNKNOWN and self.stated_value:
+            raise ValueError(
+                "A condition with a stated value cannot be UNKNOWN; evaluate it as MET or NOT_MET"
+            )
+        if self.status is not ConditionStatus.UNKNOWN and not self.stated_value:
+            raise ValueError(
+                "A condition can only be MET or NOT_MET when the question supplies a value"
+            )
+        return self
+
+
 class Citation(BaseModel):
     """A typed source pointer bound to one retrieved NG12 chunk."""
 
@@ -139,6 +200,59 @@ class Evidence(BaseModel):
     claim: str = Field(..., min_length=1, max_length=3000)
     supporting_citations: list[Citation] = Field(..., min_length=1, max_length=12)
     confidence: ConfidenceLevel
+    # Required rather than defaulted: an optional field is one the model can silently omit,
+    # which is exactly the failure this evaluation exists to prevent. Rationale-only claims
+    # from the full guideline legitimately pass an empty list.
+    condition_evaluations: list[ConditionEvaluation] = Field(
+        ...,
+        max_length=20,
+        description=(
+            "One entry per discrete condition in the cited recommendation. Required for every "
+            "claim citing a numbered recommendation; empty only for full-guideline rationale."
+        ),
+    )
+    condition_logic: ConditionLogic = Field(
+        ...,
+        description="How the source combines its conditions. Never assume AND where it says OR.",
+    )
+    overall_conclusion: ConditionStatus | None = Field(
+        ...,
+        description="The combined result of condition_evaluations under condition_logic.",
+    )
+
+    @model_validator(mode="after")
+    def validate_conclusion_follows_conditions(self) -> Evidence:
+        """The stated conclusion must follow from the parts, under the source's own logic."""
+
+        if not self.condition_evaluations:
+            return self
+
+        statuses = [item.status for item in self.condition_evaluations]
+        if self.condition_logic is ConditionLogic.OR:
+            expected = (
+                ConditionStatus.MET
+                if ConditionStatus.MET in statuses
+                else ConditionStatus.UNKNOWN
+                if ConditionStatus.UNKNOWN in statuses
+                else ConditionStatus.NOT_MET
+            )
+        else:
+            expected = (
+                ConditionStatus.NOT_MET
+                if ConditionStatus.NOT_MET in statuses
+                else ConditionStatus.UNKNOWN
+                if ConditionStatus.UNKNOWN in statuses
+                else ConditionStatus.MET
+            )
+
+        if self.overall_conclusion is None:
+            self.overall_conclusion = expected
+        elif self.overall_conclusion is not expected:
+            raise ValueError(
+                f"overall_conclusion {self.overall_conclusion} does not follow from "
+                f"{[s.value for s in statuses]} combined with {self.condition_logic.value}"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_claim_binding(self) -> Evidence:

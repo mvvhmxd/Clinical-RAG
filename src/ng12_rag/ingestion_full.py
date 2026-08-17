@@ -13,10 +13,11 @@ import argparse
 import hashlib
 import json
 import re
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from itertools import groupby
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any
 
 MIN_CHUNK_TOKENS = 400
 TARGET_CHUNK_TOKENS = 650
@@ -45,6 +46,41 @@ _NUMBERED_HEADING = re.compile(
     r"^(?P<number>(?:7|8|9|12)\.\d+(?:\.\d+)*)\s+(?P<title>[^\n]+)$",
     re.IGNORECASE,
 )
+
+# The full guideline's cancer-site subsections, which correspond one-to-one with the short
+# guideline's subsections. This is the link between the two tiers: a chapter number alone is
+# too coarse, because chapter 8 spans five distinct sites and chapter 12 spans five more.
+FULL_SUBSECTION_SITES: dict[str, str] = {
+    "7.1": "lung",
+    "7.2": "mesothelioma",
+    "8.1": "oesophageal",
+    "8.2": "pancreatic",
+    "8.3": "stomach",
+    "8.4": "small_intestinal",
+    "8.5": "gall_bladder",
+    "8.6": "liver",
+    "9.1": "colorectal",
+    "9.2": "anal",
+    "12.1": "prostate",
+    "12.2": "bladder",
+    "12.3": "renal",
+    "12.4": "testicular",
+    "12.5": "penile",
+}
+
+# GRADE and diagnostic-accuracy tables contain rows such as "7.5 (6.6-8.5) 220/2930" and
+# "9.03 (6.82-11.7) 52/576", which match the numbered-heading shape exactly. Treating them as
+# subsection headings silently reassigns every following chunk to a fabricated subsection, so
+# a heading must both carry a known subsection number and read like a title.
+_HEADING_TITLE = re.compile(r"^[A-Za-z][A-Za-z \-/&,'()]{2,70}$")
+
+
+def _valid_subsection_heading(number: str, title: str) -> bool:
+    """Return True only for a real cancer-site subsection heading."""
+
+    if number not in FULL_SUBSECTION_SITES:
+        return False
+    return bool(_HEADING_TITLE.fullmatch(title.strip()))
 _RECOMMENDATION_ID = re.compile(r"\b1\.\d+\.\d+\b")
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9])")
 _PAGE_FURNITURE = (
@@ -76,6 +112,7 @@ class TextUnit:
     subsection_title: str
     section_title: str
     is_heading: bool = False
+    cancer_site: str | None = None
 
 
 @dataclass
@@ -180,6 +217,7 @@ def _extract_chapter_units(document: Any, spec: ChapterSpec) -> list[TextUnit]:
     units: list[TextUnit] = []
     subsection_title = f"{spec.number} {spec.title}"
     section_title = subsection_title
+    cancer_site: str | None = None
 
     for page_number in range(spec.first_page, spec.last_page + 1):
         page = document[page_number - 1]
@@ -187,9 +225,12 @@ def _extract_chapter_units(document: Any, spec: ChapterSpec) -> list[TextUnit]:
             compact = re.sub(r"\s+", " ", block).strip()
             numbered = _NUMBERED_HEADING.fullmatch(compact)
             heading = False
-            if numbered:
+            if numbered and _valid_subsection_heading(
+                numbered.group("number"), numbered.group("title")
+            ):
                 subsection_title = f"{numbered.group('number')} {numbered.group('title').strip()}"
                 section_title = subsection_title
+                cancer_site = FULL_SUBSECTION_SITES[numbered.group("number")]
                 heading = True
             elif _is_structural_heading(block):
                 section_title = compact.rstrip(":")
@@ -204,6 +245,7 @@ def _extract_chapter_units(document: Any, spec: ChapterSpec) -> list[TextUnit]:
                         subsection_title=subsection_title,
                         section_title=section_title,
                         is_heading=heading and piece_index == 0,
+                        cancer_site=cancer_site,
                     )
                 )
     return units
@@ -273,10 +315,14 @@ def _build_chunk(
     section_title = headings[-1] if headings else draft.units[0].section_title
     subsection_title = draft.units[0].subsection_title
     linked_ids = sorted(set(_RECOMMENDATION_ID.findall(text)))
+    # Prefer the subsection-level site over the chapter-level fallback: chapter 8 alone spans
+    # oesophageal, pancreatic, stomach, gall bladder and liver.
+    sites = [unit.cancer_site for unit in draft.units if unit.cancer_site]
+    cancer_site = sites[0] if sites else spec.cancer_site
     chunk_id = f"ng12-full-ch{int(spec.number):02d}-{ordinal:04d}"
     embedding_text = (
         "NICE NG12 full evidence guideline. "
-        f"Cancer site: {spec.cancer_site.replace('_', ' ')}. "
+        f"Cancer site: {cancer_site.replace('_', ' ')}. "
         f"Chapter {spec.number}: {spec.title}. "
         f"Subsection: {subsection_title}. Section: {section_title}. "
         f"Evidence: {text}"
@@ -290,7 +336,7 @@ def _build_chunk(
             "document_type": SOURCE_DOCUMENT,
             "source_file": source_file,
             "source_sha256": source_sha256,
-            "cancer_site": spec.cancer_site,
+            "cancer_site": cancer_site,
             "chapter": spec.number,
             "chapter_number": spec.number,
             "chapter_title": spec.title,
