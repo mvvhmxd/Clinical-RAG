@@ -65,7 +65,7 @@ class RawRecommendation(BaseModel):
     guideline_version: str
 
     @model_validator(mode="after")
-    def validate_pages(self) -> "RawRecommendation":
+    def validate_pages(self) -> RawRecommendation:
         if self.page_numbers != sorted(set(self.page_numbers)):
             raise ValueError("page_numbers must be unique and sorted")
         if self.page_number != self.page_numbers[0]:
@@ -111,7 +111,7 @@ class ChunkMetadata(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def validate_pages_and_negative_provenance(self) -> "ChunkMetadata":
+    def validate_pages_and_negative_provenance(self) -> ChunkMetadata:
         unique_pages = sorted(set(self.page_numbers))
         if unique_pages != self.page_numbers:
             raise ValueError("page_numbers must be unique and sorted")
@@ -230,7 +230,7 @@ class RAGResponse(BaseModel):
     faithfulness: FaithfulnessCheck | None = None
 
     @model_validator(mode="after")
-    def validate_grounding_contract(self) -> "RAGResponse":
+    def validate_grounding_contract(self) -> RAGResponse:
         if self.status == ResponseStatus.ANSWERED:
             if not self.claims or not self.supporting_evidence or not self.citations:
                 raise ValueError(

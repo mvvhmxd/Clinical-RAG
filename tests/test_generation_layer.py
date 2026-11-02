@@ -5,6 +5,9 @@ from ng12_rag.guardrails import validate_response_sources
 from ng12_rag.response_schema import (
     CLINICAL_DISCLAIMER,
     Citation,
+    ConditionEvaluation,
+    ConditionLogic,
+    ConditionStatus,
     ConfidenceLevel,
     DocumentType,
     Evidence,
@@ -96,6 +99,17 @@ def test_short_and_full_sources_pass_exact_provenance_validation() -> None:
                 ),
                 supporting_citations=[short_citation],
                 confidence=ConfidenceLevel.HIGH,
+                condition_evaluations=[
+                    ConditionEvaluation(
+                        condition_text="a FIT result of at least 10 micrograms of haemoglobin",
+                        stated_value="12 micrograms per gram",
+                        status=ConditionStatus.MET,
+                        at_boundary=False,
+                        reasoning="12 is above the inclusive threshold of 10.",
+                    )
+                ],
+                condition_logic=ConditionLogic.SINGLE,
+                overall_conclusion=ConditionStatus.MET,
             ),
             Evidence(
                 claim=(
@@ -104,6 +118,10 @@ def test_short_and_full_sources_pass_exact_provenance_validation() -> None:
                 ),
                 supporting_citations=[full_citation],
                 confidence=ConfidenceLevel.MEDIUM,
+                # Rationale-only claims carry no referral conditions to evaluate.
+                condition_evaluations=[],
+                condition_logic=ConditionLogic.SINGLE,
+                overall_conclusion=None,
             ),
         ],
         overall_confidence=ConfidenceLevel.MEDIUM,
@@ -133,3 +151,52 @@ def test_short_and_full_sources_pass_exact_provenance_validation() -> None:
     ]
 
     assert validate_response_sources(response, chunks) == []
+
+
+def test_confidence_capping_preserves_condition_evaluations() -> None:
+    """Capping rebuilt Evidence field by field and silently dropped the evaluation."""
+
+    from ng12_rag.generation import _cap_answer_confidence
+
+    citation = Citation(
+        document_type=DocumentType.NG12_SHORT,
+        recommendation_id="1.2.4",
+        chapter_number=None,
+        chapter_title=None,
+        section_title="Upper gastrointestinal tract cancers",
+        page_number=12,
+        quoted_text="aged 40 and over and have jaundice",
+    )
+    evaluation = ConditionEvaluation(
+        condition_text="aged 40 and over",
+        stated_value="39",
+        status=ConditionStatus.NOT_MET,
+        at_boundary=False,
+        reasoning="39 is one year below the threshold of 40.",
+    )
+    response = FullResponse(
+        recommendation_summary=(
+            "This patient does not meet the criterion per NG12, Recommendation 1.2.4, p.12."
+        ),
+        evidence_list=[
+            Evidence(
+                claim="The criterion is not met per NG12, Recommendation 1.2.4, p.12.",
+                supporting_citations=[citation],
+                confidence=ConfidenceLevel.HIGH,
+                condition_evaluations=[evaluation],
+                condition_logic=ConditionLogic.AND,
+                overall_conclusion=ConditionStatus.NOT_MET,
+            )
+        ],
+        overall_confidence=ConfidenceLevel.HIGH,
+        disclaimer=CLINICAL_DISCLAIMER,
+        refusal_reason=None,
+        clarifying_question=None,
+    )
+
+    capped = _cap_answer_confidence(response, retrieval_cap=ConfidenceLevel.LOW)
+
+    assert capped.evidence_list[0].confidence is ConfidenceLevel.LOW
+    assert capped.evidence_list[0].condition_evaluations == [evaluation]
+    assert capped.evidence_list[0].overall_conclusion is ConditionStatus.NOT_MET
+    assert capped.evidence_list[0].condition_logic is ConditionLogic.AND

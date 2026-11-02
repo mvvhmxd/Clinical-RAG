@@ -15,9 +15,13 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any, TypeVar
 
-from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .deterministic import (
+    ExecutionInfo,
+    ExecutionMode,
+    generate_deterministic_response,
+)
 from .guardrails import (
     GuardrailConfig,
     assess_retrieval_confidence,
@@ -26,6 +30,7 @@ from .guardrails import (
     unsupported_generation_response,
     validate_response_sources,
 )
+from .llm_client import create_llm_client, default_generation_model
 from .prompts import (
     FAITHFULNESS_VERIFICATION_SYSTEM_PROMPT,
     GROUNDED_GENERATION_SYSTEM_PROMPT,
@@ -43,6 +48,19 @@ from .response_schema import (
 
 logger = logging.getLogger(__name__)
 
+
+class GenerationUnavailable(RuntimeError):
+    """The model path could not complete, so a non-model path must decide the outcome.
+
+    Distinct from a guardrail refusal: this means the system could not check, not that it
+    checked and declined.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 _RECOMMENDATION_ID_RE = re.compile(r"^\d+(?:\.\d+)+$")
 
@@ -52,9 +70,11 @@ class GenerationConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    model: str = Field(default_factory=lambda: os.getenv("NG12_GENERATION_MODEL", "gpt-5-mini"))
+    model: str = Field(
+        default_factory=lambda: os.getenv("NG12_GENERATION_MODEL") or default_generation_model()
+    )
     verifier_model: str = Field(
-        default_factory=lambda: os.getenv("NG12_VERIFICATION_MODEL", "gpt-5-mini")
+        default_factory=lambda: os.getenv("NG12_VERIFICATION_MODEL") or default_generation_model()
     )
     max_completion_tokens: int = Field(default=5000, ge=500, le=30000)
     verifier_max_completion_tokens: int = Field(default=3500, ge=500, le=30000)
@@ -258,6 +278,9 @@ def _model_token_limit(model: str, token_limit: int) -> dict[str, int]:
     """Select the token parameter accepted by the configured provider family."""
 
     lowered = model.casefold()
+    if lowered.startswith("gemini") or lowered.startswith("gemma"):
+        # Gemini's token budget travels inside generationConfig, set by the client adapter.
+        return {}
     if lowered.startswith("gpt-"):
         return {"max_completion_tokens": token_limit}
     return {"max_tokens": token_limit}
@@ -313,12 +336,11 @@ def _cap_answer_confidence(
         verdict = verifier_by_index.get(index)
         if verdict is not None:
             caps.append(verdict.confidence)
+        # Copy-with-update rather than reconstructing field by field: an explicit rebuild
+        # silently drops any field added later, which is how condition_evaluations went
+        # missing from capped answers.
         capped_evidence.append(
-            Evidence(
-                claim=evidence.claim,
-                supporting_citations=evidence.supporting_citations,
-                confidence=ConfidenceLevel.minimum(*caps),
-            )
+            evidence.model_copy(update={"confidence": ConfidenceLevel.minimum(*caps)})
         )
 
     overall = ConfidenceLevel.minimum(
@@ -327,13 +349,13 @@ def _cap_answer_confidence(
         verifier_overall,
         *(evidence.confidence for evidence in capped_evidence),
     )
-    return FullResponse(
-        recommendation_summary=response.recommendation_summary,
-        evidence_list=capped_evidence,
-        overall_confidence=overall,
-        disclaimer=response.disclaimer,
-        refusal_reason=None,
-        clarifying_question=None,
+    return response.model_copy(
+        update={
+            "evidence_list": capped_evidence,
+            "overall_confidence": overall,
+            "refusal_reason": None,
+            "clarifying_question": None,
+        }
     )
 
 
@@ -387,8 +409,8 @@ class GroundedGenerator:
         config: GenerationConfig | None = None,
     ) -> None:
         self.config = config or GenerationConfig()
-        # OpenAI() reads the sandbox's preconfigured OPENAI_API_KEY and endpoint.
-        self.client = client or OpenAI()
+        # Gemini when GEMINI_API_KEY is present, OpenAI otherwise; injected clients win.
+        self.client = client or create_llm_client()
 
     def _call_structured(
         self,
@@ -438,6 +460,84 @@ class GroundedGenerator:
         retrieved_chunks: Sequence[Any] | None,
     ) -> FullResponse:
         """Return a grounded answer, clarification, or safe structured refusal."""
+
+        try:
+            return self._generate_live(query, retrieved_chunks)
+        except GenerationUnavailable as exc:
+            return FullResponse.refusal(reason=exc.reason)
+
+    def generate_with_execution(
+        self,
+        query: str,
+        retrieved_chunks: Sequence[Any] | None,
+        *,
+        deterministic: bool = False,
+    ) -> tuple[FullResponse, ExecutionInfo]:
+        """Answer and report honestly which path produced the answer.
+
+        A guardrail block is reported as withheld, not as a fallback: nothing was retried and
+        nothing was extracted. When the model itself is unavailable the deterministic path
+        answers instead, and the mode says so.
+        """
+
+        if deterministic:
+            normalized = self._normalized_or_none(query, retrieved_chunks)
+            if normalized is None:
+                return (
+                    FullResponse.refusal(reason="No valid NG12 context was available."),
+                    ExecutionInfo(
+                        mode=ExecutionMode.DETERMINISTIC_SELECTED,
+                        reason="operator selected the no-LLM path",
+                    ),
+                )
+            return generate_deterministic_response(
+                query,
+                normalized,
+                mode=ExecutionMode.DETERMINISTIC_SELECTED,
+                reason="operator selected the no-LLM path",
+            )
+
+        try:
+            response = self._generate_live(query, retrieved_chunks)
+        except GenerationUnavailable as exc:
+            normalized = self._normalized_or_none(query, retrieved_chunks)
+            if normalized is None:
+                return (
+                    FullResponse.refusal(reason=exc.reason),
+                    ExecutionInfo(mode=ExecutionMode.WITHHELD, reason=exc.reason),
+                )
+            return generate_deterministic_response(
+                query, normalized, mode=ExecutionMode.FALLBACK, reason=exc.reason
+            )
+
+        if response.refusal_reason or response.clarifying_question:
+            return response, ExecutionInfo(
+                mode=ExecutionMode.WITHHELD,
+                reason=response.refusal_reason or "clarification requested",
+            )
+
+        return response, ExecutionInfo(
+            mode=ExecutionMode.LIVE,
+            model=self.config.model,
+            faithfulness_checked=self.config.run_faithfulness_check,
+        )
+
+    def _normalized_or_none(
+        self, query: str, retrieved_chunks: Sequence[Any] | None
+    ) -> list[dict[str, Any]] | None:
+        """Return validated chunks for the deterministic path, or None if there are none."""
+
+        if not isinstance(query, str) or not query.strip():
+            return None
+        normalization = normalize_retrieved_chunks(list(retrieved_chunks or []), config=self.config)
+        return normalization.chunks or None
+
+    def _generate_live(
+        self,
+        query: str,
+        retrieved_chunks: Sequence[Any] | None,
+    ) -> FullResponse:
+        """Run the model-dependent path, raising GenerationUnavailable if it cannot complete."""
 
         if not isinstance(query, str):
             return FullResponse.refusal(reason="The query must be provided as text.")
@@ -497,20 +597,16 @@ class GroundedGenerator:
             )
         except (ValidationError, ValueError, TypeError, RuntimeError) as exc:
             logger.warning("Grounded generation failed validation: %s", exc)
-            return FullResponse.refusal(
-                reason=(
-                    "The model did not return a structurally valid grounded response, so the "
-                    "system failed closed."
-                )
-            )
-        except Exception:
+            raise GenerationUnavailable(
+                "The model did not return a structurally valid grounded response, so the "
+                "system failed closed."
+            ) from exc
+        except Exception as exc:
             logger.exception("Grounded generation request failed")
-            return FullResponse.refusal(
-                reason=(
-                    "The grounded generation service was unavailable, so no clinical answer "
-                    "was produced."
-                )
-            )
+            raise GenerationUnavailable(
+                "The grounded generation service was unavailable, so no clinical answer "
+                "was produced."
+            ) from exc
 
         response = ensure_fixed_disclaimer(response)
         if response.refusal_reason or response.clarifying_question:
@@ -534,20 +630,16 @@ class GroundedGenerator:
                 )
             except (ValidationError, ValueError, TypeError, RuntimeError) as exc:
                 logger.warning("Faithfulness verification failed validation: %s", exc)
-                return FullResponse.refusal(
-                    reason=(
-                        "The post-generation faithfulness check did not return a valid verdict, "
-                        "so the answer was withheld."
-                    )
-                )
-            except Exception:
+                raise GenerationUnavailable(
+                    "The post-generation faithfulness check did not return a valid verdict, "
+                    "so the answer was withheld."
+                ) from exc
+            except Exception as exc:
                 logger.exception("Faithfulness verification request failed")
-                return FullResponse.refusal(
-                    reason=(
-                        "The post-generation faithfulness check was unavailable, so the answer "
-                        "was withheld."
-                    )
-                )
+                raise GenerationUnavailable(
+                    "The post-generation faithfulness check was unavailable, so the answer "
+                    "was withheld."
+                ) from exc
 
             faithfulness_issues = _validate_faithfulness_report(report, response)
             if faithfulness_issues:

@@ -1,0 +1,41 @@
+{
+  "content_type": "rationale_evidence",
+  "source_tier": "secondary_full_guideline",
+  "raw_chunk_count": 93,
+  "active_chunk_count": 45,
+  "excluded_chunk_count": 48,
+  "locked_cancer_sites": [
+    "bladder",
+    "colorectal",
+    "lung",
+    "oesophageal",
+    "pancreatic",
+    "renal",
+    "stomach"
+  ],
+  "linked_recommendation_counts": {
+    "1.1.1": 1,
+    "1.1.2": 5,
+    "1.2.1": 2,
+    "1.2.2": 2,
+    "1.2.4": 3,
+    "1.2.6": 1,
+    "1.2.7": 3,
+    "1.3.2": 5,
+    "1.3.5": 11,
+    "1.6.4": 4,
+    "1.6.5": 2,
+    "1.6.6": 6
+  },
+  "exclusion_reason_counts": {
+    "ambiguous_between_recommendations": 18,
+    "below_score_floor": 1,
+    "insufficient_clinical_content": 2,
+    "out_of_locked_scope": 27
+  },
+  "link_thresholds": {
+    "min_link_score": 0.08,
+    "min_link_margin": 1.15,
+    "min_clinical_tokens": 40
+  }
+}

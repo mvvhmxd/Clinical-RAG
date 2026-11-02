@@ -11,8 +11,8 @@ import json
 import logging
 import re
 from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 from ng12_rag.config import Settings
 from ng12_rag.models import (

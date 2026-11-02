@@ -6,9 +6,9 @@ import json
 import logging
 import math
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Sequence
 
 import faiss
 import numpy as np
